@@ -19,6 +19,16 @@ using namespace std;
 
 
 template <typename type>
+static ostream& operator<<(ostream&os, deque<type>& vec) {
+    os << "[";
+    for( type v : vec )
+        os << v << ", ";
+    os << "]";
+    return os;
+}
+
+
+template <typename type>
 static ostream& operator<<(ostream&os, vector<type>& vec) {
     os << "[";
     for( type v : vec )
@@ -49,7 +59,7 @@ public:
     bool enoughMeasurement();
     
     void run();
-    Rect getForeheadRegion( Rect& face, float foreheadWidthRatio, float foreheadHeightRatio );
+    Rect getForeheadRegion( Rect& face, float fh_x, float fh_y, float fh_w, float fh_h );
     void addSample( double time_measurement, double average );
     
     template <typename type>

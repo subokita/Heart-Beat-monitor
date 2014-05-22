@@ -11,17 +11,17 @@
 
 HeartBeat::HeartBeat() {
     faceClassifier.load( "/usr/local/Cellar/opencv/2.4.8.2/share/OpenCV/haarcascades/haarcascade_frontalface_default.xml" );
-    foreheadWidthRatio  = 0.25;
+    foreheadWidthRatio  = 0.20;
     foreheadHeightRatio = 0.125;
-    maxMeasurement = 10;
+    maxMeasurement = 50;
     FPS = 0.0;
     
     minBPM = 50.0;
-    maxBPM = 200.0;
+    maxBPM = 180.0;
     
-    
-    vector<double> ham = HeartBeat::hammingWindow(maxMeasurement);
-    hamming = Mat(ham);
+    /* Slices of smoked hams between toasted buns, with mayo, ketchup, caramelized onion, pickles, and harissa hot sauce */
+    vector<double> ham_ham_ham_ham_ham_ham = HeartBeat::hammingWindow(maxMeasurement);
+    hamming = Mat(ham_ham_ham_ham_ham_ham);
 }
 
 void HeartBeat::addSample( double time_measurement, double average ) {
@@ -45,27 +45,26 @@ double HeartBeat::getBPM( deque<double>& measure, deque<double>& measure_time ) 
     vector<double> time_vec( measure_time.begin(), measure_time.end() );
     
     FPS = (1.0 * maxMeasurement) / ( time_vec[maxMeasurement-1] - time_vec[0] );
+    vector<double> freq         = calcFrequency( maxMeasurement, FPS, 60.0 );
+    vector<double> even_time    = linspace( measure_time[0], measure_time[maxMeasurement - 1], maxMeasurement );
+    vector<double> interpolated = interp( even_time, time_vec, measure_vec );
+    Mat interpolated_mat( interpolated );
     
-    vector<double> even_time      = linspace( measure_time[0], measure_time[maxMeasurement - 1], maxMeasurement );
-    Mat interpolated              = Mat( HeartBeat::interp( even_time, time_vec, measure_vec ) );
-    
-    interpolated = interpolated.mul( hamming );
-    interpolated = interpolated - cv::mean( interpolated );
+    interpolated_mat = hamming.mul( interpolated_mat );
+    interpolated_mat = interpolated_mat - cv::mean( interpolated_mat );
     
     Mat fft_output;
-    dft( interpolated, fft_output, DFT_COMPLEX_OUTPUT );
+    dft( interpolated_mat, fft_output, DFT_COMPLEX_OUTPUT );
     
     vector<Mat> components;
     split(fft_output, components);
     
-    Mat fft_abs, fft_phase;
+    Mat fft_abs;
     magnitude( components[0], components[1], fft_abs );
-    cv::phase( components[0], components[1], fft_phase );
-    
-    vector<double> freq = calcFrequency( maxMeasurement, FPS, 60.0 );
     
     Mat freq_mask( freq );
-    freq_mask = (freq_mask > 50 & freq_mask < 180);
+    freq_mask = (freq_mask > minBPM & freq_mask < maxBPM );
+    
     Mat pruned;
     fft_abs.copyTo( pruned, freq_mask );
 
@@ -75,61 +74,95 @@ double HeartBeat::getBPM( deque<double>& measure, deque<double>& measure_time ) 
     return freq[max_index];
 }
 
-Rect HeartBeat::getForeheadRegion( Rect& face, float w_ratio, float h_ratio ) {
-     return Rect( face.x + (face.width * 0.5) * (1.0 - w_ratio),
-                  face.y + (face.height * 0.125) * (1.0 - h_ratio),
-                  face.width * w_ratio,
-                  face.height * h_ratio );
+Rect HeartBeat::getForeheadRegion( Rect& face, float fh_x, float fh_y, float fh_w, float fh_h ) {
+    return Rect( face.x + face.width  * fh_x - (face.width  * fh_w / 2.0),
+                 face.y + face.height * fh_y - (face.height * fh_h / 2.0),
+                 face.width  * fh_w, face.height * fh_h );
 }
 
+#define STATE_INITIAL       0
+#define STATE_DETECT_FACE   1
+#define STATE_FACE_DETECTED 2
+
 void HeartBeat::run() {
+    namedWindow( "" );
+    moveWindow("", 0, 0);
+    
     VideoCapture cap(0);
-    Mat frame;
+    Mat frame, prev_frame, gray;
     
     double start = (chrono::system_clock::now().time_since_epoch() / chrono::microseconds(1)) / 1000000.0;
-    
     CvFont font = cvFontQt("Helvetica", 18.0, CV_RGB(0, 255, 0) );
     char temp[255];
     
-    vector<Rect> faces;
+    Rect best_face;
+    int state = STATE_INITIAL;
     
+    Mat status, error;
     
     while( true ) {
         cap >> frame;
         flip( frame, frame, 1 );
         
-        double now = (chrono::system_clock::now().time_since_epoch() / chrono::microseconds(1)) / 1000000.0;
+        cvtColor( frame, gray, CV_BGR2GRAY );
+        equalizeHist( gray, gray );
         
-        faceClassifier.detectMultiScale( frame, faces, CV_HAAR_FIND_BIGGEST_OBJECT );
-        
-        if( !faces.empty() ){
-            rectangle(frame, faces[0], Scalar(0, 0, 255 ));
+        if( state != STATE_FACE_DETECTED ){
+            vector<Rect> faces;
+            faceClassifier.detectMultiScale( frame, faces );
             
-            Rect forehead = getForeheadRegion( faces[0], foreheadWidthRatio, foreheadHeightRatio );
-            rectangle(frame, forehead, Scalar(0, 255, 0 ));
-            
-            Mat subregion = Mat(frame, forehead);
-
-            Scalar avg = cv::sum( cv::mean(subregion) ) / 3.0;
-            addSample( now - start , avg[0] );
-        
-            
-            if( enoughMeasurement() ){
-                double bpm = getBPM( measurement, measurementTime );
-                sprintf( temp, "BPM: %f", bpm );
-                addText( frame, temp, Point( faces[0].x + 10, faces[0].y), font );
+            if( faces.empty() == false ) {
+                stable_sort( faces.begin(), faces.end(), [&](Rect a, Rect b) {
+                    return a.area() < b.area();
+                });
+                
+                
+                rectangle(frame, faces[0], CV_RGB(255, 0, 0));
+                
+                if( state == STATE_DETECT_FACE ){
+                    best_face = faces[0];
+                    state = STATE_FACE_DETECTED;
+                }
             }
         }
         
+        if( state == STATE_FACE_DETECTED ) {
+            rectangle(frame, best_face, CV_RGB(255, 0, 0));
+            
+            
+            Rect forehead = getForeheadRegion( best_face, 0.5, 0.18, 0.25, 0.15 );
+            Mat subregion = Mat(frame, forehead);
+            Scalar mean_values = cv::mean( subregion );
+            double average = mean_values[1];
+            
+            rectangle(frame, forehead, CV_RGB(0, 255, 0));
+            
+            double now = (chrono::system_clock::now().time_since_epoch() / chrono::microseconds(1)) / 1000000.0;
+            addSample( now - start, average );
+            
+            double bpm = getBPM( measurement, measurementTime );
+
+            sprintf( temp, "BPM: %.2f", bpm );
+            addText( frame, temp, Point(forehead.x, forehead.y), font );
+        }
+        
+        
+        
         
         imshow( "", frame );
-        if( waitKey(10) == 'q' )
+        char key = waitKey(10);
+        if( key == 's')
+            state = STATE_DETECT_FACE;
+        else if( key == 'q' )
             break;
+        
+        prev_frame = frame.clone();
     }
 }
 
 /**
  * Create a vector of values that are evenly spaced between start and end values
+ * A mimic of numpy.linspace
  */
 template <typename type>
 vector<type> HeartBeat::linspace( type start, type end, int length ) {
@@ -148,6 +181,8 @@ vector<type> HeartBeat::linspace( type start, type end, int length ) {
 
 /**
  * Perform linear interpolation
+ * http://en.wikipedia.org/wiki/Linear_interpolation 
+ * even when the formula is simple, when it's converted to C++, it's hard to read
  */
 template <typename type>
 vector<type> HeartBeat::interp( vector<type>& x, vector<type>& xp, vector<type>& yp ) {
@@ -163,7 +198,12 @@ vector<type> HeartBeat::interp( vector<type>& x, vector<type>& xp, vector<type>&
 }
 
 
-
+/**
+ * Hamming window for use with FFT as window function 
+ * http://en.wikipedia.org/wiki/Window_function#Hamming_window
+ * Read more here:
+ * http://stackoverflow.com/questions/7337709/why-do-i-need-to-apply-a-window-function-to-samples-when-building-a-power-spectr
+ */
 vector<double> HeartBeat::hammingWindow( int n ){
     vector<double> res(n);
     for( int i = 0; i < n; i++ )
@@ -171,7 +211,9 @@ vector<double> HeartBeat::hammingWindow( int n ){
     return res;
 }
 
-
+/**
+ * Calculate the frequency
+ */
 vector<double> HeartBeat::calcFrequency( int n, double fps, double scale ) {
     int size = n / 2 + 1;
     vector<double> result( n, 0 );
